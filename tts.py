@@ -1,368 +1,220 @@
 import streamlit as st
+import edge_tts
+import asyncio
 import os
-import uuid
-import json
-import math
-import threading
-import requests
-import time
-import shutil
-import re
-import logging
-from bs4 import BeautifulSoup
-from openai import OpenAI
-from filelock import FileLock
+import smtplib
+from email.mime.text import MimeText
+from email.mime.application import MIMEApplication
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
+import tempfile
+import zipfile
+from io import BytesIO
 
-# ---------------- CONFIG ----------------
+# Page config
+st.set_page_config(page_title="Text to MP3 Converter", page_icon="🎙️", layout="centered")
 
-MODEL_TTS = "gpt-4o-mini-tts"
-MODEL_TEXT = "gpt-4o-mini"
-VOICE = "alloy"
+# Title and description
+st.title("🎙️ Text to MP3 Converter with Edge TTS")
+st.markdown("Upload text files, convert them to speech using **EDGE TTS**, and get the MP3 files emailed to you!")
 
-WORDS_PER_MINUTE = 160
-MAX_MINUTES_PER_FILE = 25
-COST_PER_1K_CHARS = 0.015
+# Default voice
+DEFAULT_VOICE = "en-IN-NeerjaNeural"
 
-BASE_DIR = "jobs"
-os.makedirs(BASE_DIR, exist_ok=True)
+# Email configuration (you can move these to secrets or environment variables)
+# For production, use st.secrets instead of hardcoding
+EMAIL_ADDRESS = st.text_input("Your Email Address", placeholder="you@example.com", help="We'll send the MP3 files to this email")
+EMAIL_PASSWORD = st.text_input("Email App Password", type="password", help="Use app-specific password for Gmail/Outlook")
+SMTP_SERVER = st.selectbox("SMTP Server", ["smtp.gmail.com", "smtp.outlook.com", "smtp.mail.yahoo.com"])
+SMTP_PORT = 587
 
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+# Async function to convert text to speech
+async def text_to_speech(text, output_file, voice=DEFAULT_VOICE):
+    """Convert text to speech using Edge TTS"""
+    communicate = edge_tts.Communicate(text, voice)
+    await communicate.save(output_file)
 
-# ---------------- LOGGING SETUP ----------------
-
-def setup_job_logger(job_id):
-    log_path = os.path.join(BASE_DIR, job_id, "error.log")
-    logger = logging.getLogger(job_id)
-    logger.setLevel(logging.ERROR)
-    if not logger.handlers:
-        fh = logging.FileHandler(log_path)
-        fh.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
-        logger.addHandler(fh)
-    return logger
-
-# ---------------- STATE SAFETY + LOCK ----------------
-
-def normalize_state(state):
-    state.setdefault("status", "unknown")
-    state.setdefault("completed_files", 0)
-    state.setdefault("total_files", 0)
-    state.setdefault("story_status", "not_started")
-    state.setdefault("story_progress", 0)
-    state.setdefault("story_title", None)
-    state.setdefault("story_audio_completed", 0)
-    return state
-
-def save_state(job_id, state):
-    state_path = os.path.join(BASE_DIR, job_id, "state.json")
-    lock_path = state_path + ".lock"
-    with FileLock(lock_path):
-        with open(state_path, "w") as f:
-            json.dump(state, f)
-
-def load_state(job_id):
-    state_path = os.path.join(BASE_DIR, job_id, "state.json")
-    lock_path = state_path + ".lock"
-    if not os.path.exists(state_path):
-        return None
-    with FileLock(lock_path):
-        with open(state_path) as f:
-            state = json.load(f)
-    return normalize_state(state)
-
-def clean_job(job_id):
-    shutil.rmtree(os.path.join(BASE_DIR, job_id), ignore_errors=True)
-
-# ---------------- ESTIMATION ----------------
-
-def estimate_stats(text):
-    char_count = len(text)
-    word_count = len(text.split())
-    minutes = word_count / WORDS_PER_MINUTE
-    files = math.ceil(minutes / MAX_MINUTES_PER_FILE)
-    cost = (char_count / 1000) * COST_PER_1K_CHARS
-    return word_count, minutes, files, cost
-
-# ---------------- AUDIO GENERATOR ----------------
-
-def generate_audio_from_text(job_id, text, base_name, state_key):
-    state = load_state(job_id)
-    job_path = os.path.join(BASE_DIR, job_id)
-
-    words = text.split()
-    words_per_file = WORDS_PER_MINUTE * MAX_MINUTES_PER_FILE
-
-    chunks = [
-        " ".join(words[i:i + words_per_file])
-        for i in range(0, len(words), words_per_file)
-    ]
-
-    state["total_files"] = len(chunks)
-    save_state(job_id, state)
-
-    for i in range(state.get(state_key, 0), len(chunks)):
-        chunk = chunks[i]
-        api_chunks = [chunk[j:j+4000] for j in range(0, len(chunk), 4000)]
-        final_audio = b""
-
-        for piece in api_chunks:
-            response = client.audio.speech.create(
-                model=MODEL_TTS,
-                voice=VOICE,
-                input=piece
-            )
-            final_audio += response.content
-
-        filename = f"{base_name}_part_{i+1}.mp3"
-        with open(os.path.join(job_path, filename), "wb") as f:
-            f.write(final_audio)
-
-        state[state_key] = state.get(state_key, 0) + 1
-        save_state(job_id, state)
-
-# ---------------- ORIGINAL AUDIO WORKER ----------------
-
-def generate_original_audio(job_id):
-    state = load_state(job_id)
-    state["status"] = "running"
-    save_state(job_id, state)
-
-    generate_audio_from_text(
-        job_id,
-        state["text"],
-        "Original",
-        "completed_files"
-    )
-
-    state["status"] = "completed"
-    save_state(job_id, state)
-
-# ---------------- STORY + STORY AUDIO WORKER ----------------
-
-def generate_story_and_audio(job_id):
-    state = load_state(job_id)
-    job_path = os.path.join(BASE_DIR, job_id)
-    logger = setup_job_logger(job_id)
-
+# Function to read text file
+def read_text_file(uploaded_file):
+    """Read content from uploaded text file"""
     try:
-        # ---- Step 1: Generate story ----
-        state["story_status"] = "generating_story"
-        state["story_progress"] = 10
-        save_state(job_id, state)
+        content = uploaded_file.read().decode("utf-8")
+        return content
+    except UnicodeDecodeError:
+        try:
+            content = uploaded_file.read().decode("latin-1")
+            return content
+        except:
+            return None
 
-        # Use full original text (safe limit)
-        original_text = state["text"]
-        max_chars = 100000
-        if len(original_text) > max_chars:
-            original_text = original_text[:max_chars] + "\n[TRUNCATED]"
-
-        prompt = f"""
-Rewrite the following story in Indian cultural context.
-
-IMPORTANT:
-- The story MUST remain fully in English.
-- Do NOT translate into Hindi.
-- Use Indian names, locations, traditions.
-- Maintain similar plot structure and emotional arc.
-- Keep similar length.
-
-Return **exactly** in this format (no extra text before or after):
-
-TITLE: <Your English title>
-STORY:
-<Full story in English>
-
-Original:
-{original_text}
-"""
-
-        # Retry up to 3 times on API errors
-        for attempt in range(3):
-            try:
-                response = client.chat.completions.create(
-                    model=MODEL_TEXT,
-                    messages=[
-                        {"role": "system", "content": "You are a skilled Indian fiction writer. Follow the output format strictly."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.8,
-                )
-                break
-            except Exception as e:
-                if attempt == 2:
-                    raise
-                time.sleep(2 ** attempt)
-
-        content = response.choices[0].message.content
-
-        # Robust parsing
-        title_match = re.search(r"TITLE:\s*(.+?)(?:\n|$)", content, re.IGNORECASE)
-        story_match = re.search(r"STORY:\s*(.+?)$", content, re.DOTALL | re.IGNORECASE)
-
-        title = title_match.group(1).strip() if title_match else "Untitled_Story"
-        story_text = story_match.group(1).strip() if story_match else ""
-
-        # Validation
-        if not story_text or len(story_text.split()) < 50:
-            raise ValueError(f"Generated story too short. Length: {len(story_text)} chars, words: {len(story_text.split())}")
-
-        safe_title = "".join(c for c in title if c.isalnum() or c in " _-")
-        state["story_title"] = safe_title
-
-        with open(os.path.join(job_path, f"{safe_title}.txt"), "w", encoding="utf-8") as f:
-            f.write(story_text)
-
-        state["story_progress"] = 60
-        state["story_status"] = "generating_audio"
-        save_state(job_id, state)
-
-        # ---- Step 2: Generate audio ----
-        generate_audio_from_text(
-            job_id,
-            story_text,
-            safe_title,
-            "story_audio_completed"
-        )
-
-        state["story_progress"] = 100
-        state["story_status"] = "completed"
-        save_state(job_id, state)
-
+# Function to send email with MP3 attachment
+def send_email_with_attachment(recipient_email, subject, body, attachment_path, sender_email, sender_password, smtp_server, smtp_port):
+    """Send email with MP3 attachment"""
+    try:
+        # Create message
+        msg = MIMEMultipart()
+        msg['From'] = sender_email
+        msg['To'] = recipient_email
+        msg['Subject'] = subject
+        
+        # Attach body
+        msg.attach(MimeText(body, 'plain'))
+        
+        # Attach file
+        with open(attachment_path, 'rb') as file:
+            part = MIMEBase('audio', 'mp3')
+            part.set_payload(file.read())
+            encoders.encode_base64(part)
+            part.add_header('Content-Disposition', f'attachment; filename="{os.path.basename(attachment_path)}"')
+            msg.attach(part)
+        
+        # Send email
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            server.login(sender_email, sender_password)
+            server.send_message(msg)
+        
+        return True, "Email sent successfully!"
     except Exception as e:
-        error_msg = str(e)
-        logger.error(error_msg, exc_info=True)
-        state["story_status"] = f"failed: {error_msg[:100]}"
-        save_state(job_id, state)
+        return False, f"Error sending email: {str(e)}"
 
-# ---------------- AUTO REFRESH (30 SECONDS) ----------------
+# Function to process single file
+async def process_single_file(uploaded_file, temp_dir, file_index):
+    """Process a single uploaded file"""
+    file_name = uploaded_file.name
+    file_content = read_text_file(uploaded_file)
+    
+    if file_content is None:
+        return None, f"❌ Failed to read {file_name}", None
+    
+    if not file_content.strip():
+        return None, f"⚠️ {file_name} is empty", None
+    
+    # Create MP3 file path
+    mp3_filename = f"output_{file_index}_{os.path.splitext(file_name)[0]}.mp3"
+    mp3_path = os.path.join(temp_dir, mp3_filename)
+    
+    # Convert to speech
+    try:
+        await text_to_speech(file_content, mp3_path, DEFAULT_VOICE)
+        return mp3_path, f"✅ Converted: {file_name} → {mp3_filename}", file_name
+    except Exception as e:
+        return None, f"❌ Error converting {file_name}: {str(e)}", None
 
-def auto_refresh():
-    """Call this inside the View Jobs section to rerun every 30 seconds."""
-    if "last_refresh" not in st.session_state:
-        st.session_state.last_refresh = time.time()
-    if time.time() - st.session_state.last_refresh >= 30:
-        st.session_state.last_refresh = time.time()
-        st.rerun()
+# Main application
+st.markdown("---")
 
-# ---------------- UI ----------------
+# Upload options
+upload_option = st.radio("Choose upload option:", ["Single File", "Batch of 5 Files"])
 
-st.title("Audiobook + Indian Themed Story Generator")
-menu = st.sidebar.radio("Menu", ["Create Job", "View Jobs", "Clean Jobs"])
+uploaded_files = []
+single_file = None
 
-# ---------------- CREATE JOB ----------------
+if upload_option == "Single File":
+    single_file = st.file_uploader("Upload a text file", type=['txt'], key="single")
+    if single_file:
+        uploaded_files = [single_file]
+else:
+    batch_files = st.file_uploader("Upload up to 5 text files", type=['txt'], accept_multiple_files=True, key="batch")
+    if batch_files and len(batch_files) > 5:
+        st.warning("Please upload maximum 5 files. Only first 5 will be processed.")
+        uploaded_files = batch_files[:5]
+    elif batch_files:
+        uploaded_files = batch_files
 
-if menu == "Create Job":
-    input_type = st.radio("Input Type", ["Paste Text", "Enter URL"])
-    text_content = ""
-
-    if input_type == "Paste Text":
-        text_content = st.text_area("Paste text", height=250)
+# Process button
+if st.button("🚀 Convert and Send", type="primary"):
+    if not uploaded_files:
+        st.error("Please upload at least one text file.")
+    elif not EMAIL_ADDRESS or not EMAIL_PASSWORD:
+        st.error("Please provide email credentials.")
     else:
-        url = st.text_input("Enter URL")
-        if url:
-            try:
-                response = requests.get(url, timeout=10)
-                soup = BeautifulSoup(response.text, "html.parser")
-                for tag in soup(["script", "style"]):
-                    tag.extract()
-                text_content = soup.get_text(separator=" ", strip=True)
-                st.success("Text extracted.")
-            except Exception:
-                st.error("Failed to fetch URL.")
-
-    if text_content.strip():
-        words, minutes, files, cost = estimate_stats(text_content)
-        st.markdown("### Estimate")
-        st.write(f"Words: {words:,}")
-        st.write(f"Estimated Duration: {minutes:.1f} minutes")
-        st.write(f"Estimated Files: {files}")
-        st.write(f"Estimated Audio Cost: ${cost:.4f}")
-
-        if st.button("Confirm & Start"):
-            job_id = str(uuid.uuid4())
-            os.makedirs(os.path.join(BASE_DIR, job_id), exist_ok=True)
-
-            state = {
-                "job_id": job_id,
-                "text": text_content,
-                "status": "queued",
-                "completed_files": 0,
-                "story_status": "queued",
-                "story_progress": 0,
-                "story_audio_completed": 0
-            }
-            save_state(job_id, state)
-
-            threading.Thread(target=generate_original_audio, args=(job_id,), daemon=True).start()
-            threading.Thread(target=generate_story_and_audio, args=(job_id,), daemon=True).start()
-
-            st.success(f"Job started: {job_id}")
-
-# ---------------- VIEW JOBS (with auto-refresh & unique keys) ----------------
-
-if menu == "View Jobs":
-    auto_refresh()   # <-- refreshes page every 30 seconds
-
-    jobs = os.listdir(BASE_DIR)
-
-    if not jobs:
-        st.info("No jobs yet. Create one from the sidebar.")
-    else:
-        for job_id in jobs:
-            state = load_state(job_id)
-            if not state:
-                continue
-
+        # Create temporary directory for MP3 files
+        with tempfile.TemporaryDirectory() as temp_dir:
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            results = []
+            
+            # Process each file
+            for idx, file in enumerate(uploaded_files):
+                status_text.write(f"📄 Processing {idx+1}/{len(uploaded_files)}: {file.name}...")
+                
+                mp3_path, message, original_name = await process_single_file(file, temp_dir, idx+1)
+                results.append((mp3_path, message, original_name))
+                
+                progress_bar.progress((idx + 1) / len(uploaded_files))
+            
+            # Send emails
             st.markdown("---")
-            st.markdown(f"### Job: {job_id}")
-
-            col1, col2 = st.columns(2)
-            col1.write(f"**Original Audio:** {state['status']}")
-            col2.write(f"**Indian Story:** {state['story_status']}")
-
-            if "failed" in state["story_status"]:
-                st.error(f"Story generation failed: {state['story_status']}")
-
-            # Progress bar for story generation
-            st.progress(state["story_progress"] / 100)
-
-            job_path = os.path.join(BASE_DIR, job_id)
-
-            # Download buttons for all files
-            for file in os.listdir(job_path):
-                if file.endswith(".mp3") or file.endswith(".txt"):
-                    with open(os.path.join(job_path, file), "rb") as f:
-                        st.download_button(
-                            f"Download {file}",
-                            f,
-                            file,
-                            key=f"download_{job_id}_{file}"   # unique key
-                        )
-
-            # Show error log if exists (with unique key)
-            error_log = os.path.join(job_path, "error.log")
-            if os.path.exists(error_log):
-                with open(error_log) as f:
-                    st.text_area(
-                        "Error Log (last 10 lines)",
-                        "\n".join(f.readlines()[-10:]),
-                        height=150,
-                        key=f"error_log_{job_id}"   # unique key per job
+            st.subheader("📧 Sending emails...")
+            
+            successful_sends = 0
+            for idx, (mp3_path, message, original_name) in enumerate(results):
+                if mp3_path and os.path.exists(mp3_path):
+                    status_text.write(f"📧 Sending email for {original_name}...")
+                    
+                    subject = f"Your MP3 Conversion: {original_name}"
+                    body = f"Dear User,\n\nYour text file '{original_name}' has been successfully converted to speech using Edge TTS.\n\nPlease find attached the MP3 file.\n\nBest regards,\nTTS Converter"
+                    
+                    success, msg = send_email_with_attachment(
+                        EMAIL_ADDRESS, subject, body, mp3_path,
+                        EMAIL_ADDRESS, EMAIL_PASSWORD, SMTP_SERVER, SMTP_PORT
                     )
+                    
+                    if success:
+                        successful_sends += 1
+                        st.success(f"✅ {original_name} - Email sent!")
+                    else:
+                        st.error(f"❌ {original_name} - {msg}")
+                else:
+                    st.error(f"❌ {original_name or f'File {idx+1}'} - Conversion failed")
+            
+            # Final summary
+            st.markdown("---")
+            if successful_sends == len(uploaded_files):
+                st.success(f"🎉 All {successful_sends} files processed and sent successfully!")
+            elif successful_sends > 0:
+                st.warning(f"⚠️ {successful_sends}/{len(uploaded_files)} files sent successfully.")
+            else:
+                st.error("❌ No files were sent. Please check the errors above.")
+            
+            # Display all messages
+            st.subheader("📋 Processing Log:")
+            for _, message, _ in results:
+                st.text(message)
 
-# ---------------- CLEAN JOBS ----------------
+# Instructions
+with st.expander("📖 How to use this app"):
+    st.markdown("""
+    ### Setup Instructions:
+    1. **Get Email App Password**:
+       - For Gmail: Enable 2FA and generate an App Password
+       - For Outlook: Use your regular password or App Password
+    
+    2. **Upload Text Files**:
+       - Single file: Choose one .txt file
+       - Batch: Choose up to 5 .txt files
+    
+    3. **Enter Email Credentials**:
+       - Your email address
+       - App password (not your regular password)
+    
+    4. **Click Convert & Send**
+    
+    ### Features:
+    - Uses **Edge TTS** (Microsoft's neural voices)
+    - Default voice: **en-IN-NeerjaNeural** (Indian English female)
+    - Each file gets converted individually
+    - You receive separate emails for each MP3
+    - Works with large text files
+    
+    ### Note:
+    - Text files must be UTF-8 encoded
+    - For batch processing, files are processed sequentially
+    - MP3 files are deleted from server after sending
+    """)
 
-if menu == "Clean Jobs":
-    jobs = os.listdir(BASE_DIR)
-    if jobs:
-        selected = st.selectbox("Select Job", jobs)
-        if st.button("Delete Selected"):
-            clean_job(selected)
-            st.success("Deleted.")
-            st.rerun()
-        if st.button("Delete ALL"):
-            for j in jobs:
-                clean_job(j)
-            st.success("All deleted.")
-            st.rerun()
-    else:
-        st.info("No jobs available.")
+# Footer
+st.markdown("---")
+st.markdown("Built with Streamlit + Edge TTS | © 2024")
