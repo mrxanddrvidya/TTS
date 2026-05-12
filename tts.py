@@ -184,17 +184,3 @@ if st.button("🚀 Convert and Send", type="primary"):
             else:
                 st.error("❌ No files were sent successfully")
 
-# Instructions
-with st.expander("📖 How to use"):
-    st.markdown("--")
-    **Setup Instructions:**
-    
-    1. **Get Resend API Key**:
-       - Sign up at [Resend.com](https://resend.com)
-       - Go to API Keys section
-       - Create a new API key
-       - Copy the key
-    
-    2. **Configure Secrets**:
-       - Create `.streamlit/secrets.toml` in your app directory
-       - Add the following:
