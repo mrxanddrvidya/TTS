@@ -2,32 +2,24 @@ import streamlit as st
 import edge_tts
 import asyncio
 import os
-import smtplib
-from email.mime.text import MimeText
-from email.mime.application import MIMEApplication
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email import encoders
 import tempfile
-import zipfile
-from io import BytesIO
+import requests
+from pathlib import Path
 
 # Page config
 st.set_page_config(page_title="Text to MP3 Converter", page_icon="🎙️", layout="centered")
 
 # Title and description
 st.title("🎙️ Text to MP3 Converter with Edge TTS")
-st.markdown("Upload text files, convert them to speech using **EDGE TTS**, and get the MP3 files emailed to you!")
+st.markdown("Upload text files, convert them to speech using **EDGE TTS**, and get the MP3 files emailed to you via Resend API!")
 
 # Default voice
 DEFAULT_VOICE = "en-IN-NeerjaNeural"
 
-# Email configuration (you can move these to secrets or environment variables)
-# For production, use st.secrets instead of hardcoding
-EMAIL_ADDRESS = st.text_input("Your Email Address", placeholder="you@example.com", help="We'll send the MP3 files to this email")
-EMAIL_PASSWORD = st.text_input("Email App Password", type="password", help="Use app-specific password for Gmail/Outlook")
-SMTP_SERVER = st.selectbox("SMTP Server", ["smtp.gmail.com", "smtp.outlook.com", "smtp.mail.yahoo.com"])
-SMTP_PORT = 587
+# Resend API configuration (from secrets)
+RESEND_API_KEY = st.secrets.get("RESEND_API_KEY", "")
+FROM_EMAIL = st.secrets.get("FROM_EMAIL", "onboarding@resend.dev")  # Resend's default sending domain
+TO_EMAIL = st.text_input("Recipient Email Address", placeholder="recipient@example.com", help="Where to send the MP3 files")
 
 # Async function to convert text to speech
 async def text_to_speech(text, output_file, voice=DEFAULT_VOICE):
@@ -48,34 +40,54 @@ def read_text_file(uploaded_file):
         except:
             return None
 
-# Function to send email with MP3 attachment
-def send_email_with_attachment(recipient_email, subject, body, attachment_path, sender_email, sender_password, smtp_server, smtp_port):
-    """Send email with MP3 attachment"""
+# Function to send email using Resend API
+def send_email_via_resend(recipient_email, subject, body, attachment_path, api_key, from_email):
+    """Send email with MP3 attachment using Resend API"""
     try:
-        # Create message
-        msg = MIMEMultipart()
-        msg['From'] = sender_email
-        msg['To'] = recipient_email
-        msg['Subject'] = subject
+        # Resend API endpoint
+        url = "https://api.resend.com/emails"
         
-        # Attach body
-        msg.attach(MimeText(body, 'plain'))
+        # Headers
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
         
-        # Attach file
-        with open(attachment_path, 'rb') as file:
-            part = MIMEBase('audio', 'mp3')
-            part.set_payload(file.read())
-            encoders.encode_base64(part)
-            part.add_header('Content-Disposition', f'attachment; filename="{os.path.basename(attachment_path)}"')
-            msg.attach(part)
+        # Read attachment file
+        with open(attachment_path, 'rb') as f:
+            attachment_content = f.read()
         
-        # Send email
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()
-            server.login(sender_email, sender_password)
-            server.send_message(msg)
+        # Import base64 for encoding attachment
+        import base64
+        encoded_attachment = base64.b64encode(attachment_content).decode('utf-8')
         
-        return True, "Email sent successfully!"
+        # Get filename
+        filename = os.path.basename(attachment_path)
+        
+        # Prepare email payload
+        payload = {
+            "from": from_email,
+            "to": [recipient_email],
+            "subject": subject,
+            "html": f"<p>{body.replace(chr(10), '<br>')}</p>",
+            "attachments": [
+                {
+                    "filename": filename,
+                    "content": encoded_attachment,
+                    "content_type": "audio/mpeg"
+                }
+            ]
+        }
+        
+        # Send request
+        response = requests.post(url, json=payload, headers=headers)
+        
+        if response.status_code == 200:
+            return True, "Email sent successfully via Resend!"
+        else:
+            error_detail = response.json().get('message', 'Unknown error')
+            return False, f"Resend API error: {error_detail}"
+            
     except Exception as e:
         return False, f"Error sending email: {str(e)}"
 
@@ -92,7 +104,7 @@ async def process_single_file(uploaded_file, temp_dir, file_index):
         return None, f"⚠️ {file_name} is empty", None
     
     # Create MP3 file path
-    mp3_filename = f"output_{file_index}_{os.path.splitext(file_name)[0]}.mp3"
+    mp3_filename = f"output_{file_index}_{Path(file_name).stem}.mp3"
     mp3_path = os.path.join(temp_dir, mp3_filename)
     
     # Convert to speech
@@ -104,6 +116,11 @@ async def process_single_file(uploaded_file, temp_dir, file_index):
 
 # Main application
 st.markdown("---")
+
+# Check API key
+if not RESEND_API_KEY:
+    st.error("⚠️ Resend API Key not found in secrets! Please add RESEND_API_KEY to your .streamlit/secrets.toml")
+    st.stop()
 
 # Upload options
 upload_option = st.radio("Choose upload option:", ["Single File", "Batch of 5 Files"])
@@ -127,8 +144,8 @@ else:
 if st.button("🚀 Convert and Send", type="primary"):
     if not uploaded_files:
         st.error("Please upload at least one text file.")
-    elif not EMAIL_ADDRESS or not EMAIL_PASSWORD:
-        st.error("Please provide email credentials.")
+    elif not TO_EMAIL:
+        st.error("Please provide recipient email address.")
     else:
         # Create temporary directory for MP3 files
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -147,7 +164,7 @@ if st.button("🚀 Convert and Send", type="primary"):
             
             # Send emails
             st.markdown("---")
-            st.subheader("📧 Sending emails...")
+            st.subheader("📧 Sending emails via Resend API...")
             
             successful_sends = 0
             for idx, (mp3_path, message, original_name) in enumerate(results):
@@ -155,16 +172,28 @@ if st.button("🚀 Convert and Send", type="primary"):
                     status_text.write(f"📧 Sending email for {original_name}...")
                     
                     subject = f"Your MP3 Conversion: {original_name}"
-                    body = f"Dear User,\n\nYour text file '{original_name}' has been successfully converted to speech using Edge TTS.\n\nPlease find attached the MP3 file.\n\nBest regards,\nTTS Converter"
+                    body = f"""Dear User,
+
+Your text file '{original_name}' has been successfully converted to speech using Edge TTS (Microsoft Neural Voice: en-IN-NeerjaNeural).
+
+Please find attached the MP3 file.
+
+File details:
+- Original file: {original_name}
+- Voice: Indian English (Female)
+- Format: MP3
+
+Best regards,
+TTS Converter"""
                     
-                    success, msg = send_email_with_attachment(
-                        EMAIL_ADDRESS, subject, body, mp3_path,
-                        EMAIL_ADDRESS, EMAIL_PASSWORD, SMTP_SERVER, SMTP_PORT
+                    success, msg = send_email_via_resend(
+                        TO_EMAIL, subject, body, mp3_path,
+                        RESEND_API_KEY, FROM_EMAIL
                     )
                     
                     if success:
                         successful_sends += 1
-                        st.success(f"✅ {original_name} - Email sent!")
+                        st.success(f"✅ {original_name} - Email sent via Resend!")
                     else:
                         st.error(f"❌ {original_name} - {msg}")
                 else:
@@ -173,7 +202,7 @@ if st.button("🚀 Convert and Send", type="primary"):
             # Final summary
             st.markdown("---")
             if successful_sends == len(uploaded_files):
-                st.success(f"🎉 All {successful_sends} files processed and sent successfully!")
+                st.success(f"🎉 All {successful_sends} files processed and sent successfully via Resend!")
             elif successful_sends > 0:
                 st.warning(f"⚠️ {successful_sends}/{len(uploaded_files)} files sent successfully.")
             else:
@@ -188,33 +217,16 @@ if st.button("🚀 Convert and Send", type="primary"):
 with st.expander("📖 How to use this app"):
     st.markdown("""
     ### Setup Instructions:
-    1. **Get Email App Password**:
-       - For Gmail: Enable 2FA and generate an App Password
-       - For Outlook: Use your regular password or App Password
     
-    2. **Upload Text Files**:
-       - Single file: Choose one .txt file
-       - Batch: Choose up to 5 .txt files
+    1. **Get Resend API Key**:
+       - Sign up at [Resend.com](https://resend.com)
+       - Go to API Keys section
+       - Create a new API key
+       - Copy the key
     
-    3. **Enter Email Credentials**:
-       - Your email address
-       - App password (not your regular password)
-    
-    4. **Click Convert & Send**
-    
-    ### Features:
-    - Uses **Edge TTS** (Microsoft's neural voices)
-    - Default voice: **en-IN-NeerjaNeural** (Indian English female)
-    - Each file gets converted individually
-    - You receive separate emails for each MP3
-    - Works with large text files
-    
-    ### Note:
-    - Text files must be UTF-8 encoded
-    - For batch processing, files are processed sequentially
-    - MP3 files are deleted from server after sending
-    """)
-
-# Footer
-st.markdown("---")
-st.markdown("Built with Streamlit + Edge TTS | © 2024")
+    2. **Configure Secrets**:
+       - Create `.streamlit/secrets.toml` in your app directory
+       - Add the following:
+         ```toml
+         RESEND_API_KEY = "re_your_api_key_here"
+         FROM_EMAIL = "your_verified_domain@example.com"  # or use "onboarding@resend.dev" for testing
