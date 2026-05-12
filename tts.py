@@ -181,8 +181,3 @@ if st.button("🚀 Convert and Send", type="primary"):
             else:
                 st.warning(f"Sent {successful}/{len(uploaded_files)} files")
 
-# Instructions
-with st.expander("How to use"):
-    st.markdown("""
-    1. Get Resend API key from [resend.com](https://resend.com)
-    2. Create `.streamlit/secrets.toml` with:
