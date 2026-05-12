@@ -84,9 +84,9 @@ def send_email_via_resend(recipient_email, subject, body, attachment_path, api_k
     except Exception as e:
         return False, f"Error: {str(e)}"
 
-# Function to process single file
-async def process_single_file(uploaded_file, temp_dir, file_index):
-    """Process a single uploaded file"""
+# Function to process single file (synchronous wrapper)
+def process_single_file(uploaded_file, temp_dir, file_index):
+    """Process a single uploaded file - synchronous wrapper"""
     file_name = uploaded_file.name
     file_content = read_text_file(uploaded_file)
     
@@ -100,7 +100,8 @@ async def process_single_file(uploaded_file, temp_dir, file_index):
     mp3_path = os.path.join(temp_dir, mp3_filename)
     
     try:
-        await text_to_speech(file_content, mp3_path, DEFAULT_VOICE)
+        # Run async function synchronously
+        asyncio.run(text_to_speech(file_content, mp3_path, DEFAULT_VOICE))
         return mp3_path, f"Converted: {file_name}", file_name
     except Exception as e:
         return None, f"Error converting {file_name}: {str(e)}", None
@@ -144,10 +145,10 @@ if st.button("🚀 Convert and Send", type="primary"):
             status_text = st.empty()
             results = []
             
-            # Process files
+            # Process files (no await needed)
             for idx, file in enumerate(uploaded_files):
                 status_text.info(f"Processing {idx+1}/{len(uploaded_files)}: {file.name}")
-                mp3_path, message, original_name = await process_single_file(file, temp_dir, idx+1)
+                mp3_path, message, original_name = process_single_file(file, temp_dir, idx+1)
                 results.append((mp3_path, message, original_name))
                 progress_bar.progress((idx + 1) / len(uploaded_files))
             
@@ -159,7 +160,7 @@ if st.button("🚀 Convert and Send", type="primary"):
             for mp3_path, message, original_name in results:
                 if mp3_path and os.path.exists(mp3_path):
                     subject = f"Your MP3: {original_name}"
-                    body = f"Your file '{original_name}' has been converted to MP3 using Edge TTS."
+                    body = f"Your file '{original_name}' has been converted to MP3 using Edge TTS (Voice: en-IN-NeerjaNeural)."
                     
                     success, msg = send_email_via_resend(
                         TO_EMAIL, subject, body, mp3_path,
@@ -168,16 +169,32 @@ if st.button("🚀 Convert and Send", type="primary"):
                     
                     if success:
                         successful += 1
-                        st.success(f"Sent: {original_name}")
+                        st.success(f"✅ Sent: {original_name}")
                     else:
-                        st.error(f"Failed: {original_name} - {msg}")
+                        st.error(f"❌ Failed: {original_name} - {msg}")
                 else:
-                    st.error(f"Failed: {message}")
+                    st.error(f"❌ Failed: {message}")
             
             # Summary
             st.markdown("---")
             if successful == len(uploaded_files):
-                st.success(f"All {successful} files sent successfully!")
+                st.success(f"🎉 All {successful} files sent successfully!")
+            elif successful > 0:
+                st.warning(f"⚠️ Sent {successful}/{len(uploaded_files)} files")
             else:
-                st.warning(f"Sent {successful}/{len(uploaded_files)} files")
+                st.error("❌ No files were sent successfully")
 
+# Instructions
+with st.expander("📖 How to use"):
+    st.markdown("--")
+    **Setup Instructions:**
+    
+    1. **Get Resend API Key**:
+       - Sign up at [Resend.com](https://resend.com)
+       - Go to API Keys section
+       - Create a new API key
+       - Copy the key
+    
+    2. **Configure Secrets**:
+       - Create `.streamlit/secrets.toml` in your app directory
+       - Add the following:
