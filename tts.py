@@ -4,6 +4,7 @@ import asyncio
 import os
 import tempfile
 import requests
+import base64
 from pathlib import Path
 
 # Page config
@@ -44,52 +45,44 @@ def read_text_file(uploaded_file):
 def send_email_via_resend(recipient_email, subject, body, attachment_path, api_key, from_email):
     """Send email with MP3 attachment using Resend API"""
     try:
-        # Resend API endpoint
         url = "https://api.resend.com/emails"
         
-        # Headers
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
         
-        # Read attachment file
+        # Read and encode attachment
         with open(attachment_path, 'rb') as f:
-            attachment_content = f.read()
+            attachment_content = base64.b64encode(f.read()).decode('utf-8')
         
-        # Import base64 for encoding attachment
-        import base64
-        encoded_attachment = base64.b64encode(attachment_content).decode('utf-8')
-        
-        # Get filename
         filename = os.path.basename(attachment_path)
         
-        # Prepare email payload
+        # Prepare payload
         payload = {
             "from": from_email,
             "to": [recipient_email],
             "subject": subject,
-            "html": f"<p>{body.replace(chr(10), '<br>')}</p>",
+            "html": body.replace("\n", "<br>"),
             "attachments": [
                 {
                     "filename": filename,
-                    "content": encoded_attachment,
+                    "content": attachment_content,
                     "content_type": "audio/mpeg"
                 }
             ]
         }
         
-        # Send request
         response = requests.post(url, json=payload, headers=headers)
         
         if response.status_code == 200:
-            return True, "Email sent successfully via Resend!"
+            return True, "Email sent successfully!"
         else:
             error_detail = response.json().get('message', 'Unknown error')
             return False, f"Resend API error: {error_detail}"
             
     except Exception as e:
-        return False, f"Error sending email: {str(e)}"
+        return False, f"Error: {str(e)}"
 
 # Function to process single file
 async def process_single_file(uploaded_file, temp_dir, file_index):
@@ -98,35 +91,33 @@ async def process_single_file(uploaded_file, temp_dir, file_index):
     file_content = read_text_file(uploaded_file)
     
     if file_content is None:
-        return None, f"❌ Failed to read {file_name}", None
+        return None, f"Failed to read {file_name}", None
     
     if not file_content.strip():
-        return None, f"⚠️ {file_name} is empty", None
+        return None, f"File {file_name} is empty", None
     
-    # Create MP3 file path
     mp3_filename = f"output_{file_index}_{Path(file_name).stem}.mp3"
     mp3_path = os.path.join(temp_dir, mp3_filename)
     
-    # Convert to speech
     try:
         await text_to_speech(file_content, mp3_path, DEFAULT_VOICE)
-        return mp3_path, f"✅ Converted: {file_name} → {mp3_filename}", file_name
+        return mp3_path, f"Converted: {file_name}", file_name
     except Exception as e:
-        return None, f"❌ Error converting {file_name}: {str(e)}", None
+        return None, f"Error converting {file_name}: {str(e)}", None
 
-# Main application
+# Main UI
 st.markdown("---")
 
 # Check API key
 if not RESEND_API_KEY:
-    st.error("⚠️ Resend API Key not found in secrets! Please add RESEND_API_KEY to your .streamlit/secrets.toml")
+    st.error("⚠️ Resend API Key not found in secrets!")
+    st.info("Please add RESEND_API_KEY to .streamlit/secrets.toml")
     st.stop()
 
 # Upload options
 upload_option = st.radio("Choose upload option:", ["Single File", "Batch of 5 Files"])
 
 uploaded_files = []
-single_file = None
 
 if upload_option == "Single File":
     single_file = st.file_uploader("Upload a text file", type=['txt'], key="single")
@@ -134,11 +125,12 @@ if upload_option == "Single File":
         uploaded_files = [single_file]
 else:
     batch_files = st.file_uploader("Upload up to 5 text files", type=['txt'], accept_multiple_files=True, key="batch")
-    if batch_files and len(batch_files) > 5:
-        st.warning("Please upload maximum 5 files. Only first 5 will be processed.")
-        uploaded_files = batch_files[:5]
-    elif batch_files:
-        uploaded_files = batch_files
+    if batch_files:
+        if len(batch_files) > 5:
+            st.warning("Maximum 5 files will be processed")
+            uploaded_files = batch_files[:5]
+        else:
+            uploaded_files = batch_files
 
 # Process button
 if st.button("🚀 Convert and Send", type="primary"):
@@ -147,39 +139,27 @@ if st.button("🚀 Convert and Send", type="primary"):
     elif not TO_EMAIL:
         st.error("Please provide recipient email address.")
     else:
-        # Create temporary directory for MP3 files
         with tempfile.TemporaryDirectory() as temp_dir:
             progress_bar = st.progress(0)
             status_text = st.empty()
             results = []
             
-            # Process each file
+            # Process files
             for idx, file in enumerate(uploaded_files):
-                status_text.write(f"📄 Processing {idx+1}/{len(uploaded_files)}: {file.name}...")
-                
+                status_text.info(f"Processing {idx+1}/{len(uploaded_files)}: {file.name}")
                 mp3_path, message, original_name = await process_single_file(file, temp_dir, idx+1)
                 results.append((mp3_path, message, original_name))
-                
                 progress_bar.progress((idx + 1) / len(uploaded_files))
             
             # Send emails
             st.markdown("---")
-            st.subheader("📧 Sending emails via Resend API...")
+            st.subheader("Sending emails...")
             
-            successful_sends = 0
-            for idx, (mp3_path, message, original_name) in enumerate(results):
+            successful = 0
+            for mp3_path, message, original_name in results:
                 if mp3_path and os.path.exists(mp3_path):
-                    status_text.write(f"📧 Sending email for {original_name}...")
-                    
-                    subject = f"Your MP3 Conversion: {original_name}"
-                    body = f"""Dear User,
-
-Your text file '{original_name}' has been successfully converted to speech using Edge TTS.
-
-Please find attached the MP3 file.
-
-Best regards,
-TTS Converter"""
+                    subject = f"Your MP3: {original_name}"
+                    body = f"Your file '{original_name}' has been converted to MP3 using Edge TTS."
                     
                     success, msg = send_email_via_resend(
                         TO_EMAIL, subject, body, mp3_path,
@@ -187,38 +167,22 @@ TTS Converter"""
                     )
                     
                     if success:
-                        successful_sends += 1
-                        st.success(f"✅ {original_name} - Email sent via Resend!")
+                        successful += 1
+                        st.success(f"Sent: {original_name}")
                     else:
-                        st.error(f"❌ {original_name} - {msg}")
+                        st.error(f"Failed: {original_name} - {msg}")
                 else:
-                    st.error(f"❌ {original_name or f'File {idx+1}'} - Conversion failed")
+                    st.error(f"Failed: {message}")
             
-            # Final summary
+            # Summary
             st.markdown("---")
-            if successful_sends == len(uploaded_files):
-                st.success(f"🎉 All {successful_sends} files processed and sent successfully via Resend!")
-            elif successful_sends > 0:
-                st.warning(f"⚠️ {successful_sends}/{len(uploaded_files)} files sent successfully.")
+            if successful == len(uploaded_files):
+                st.success(f"All {successful} files sent successfully!")
             else:
-                st.error("❌ No files were sent. Please check the errors above.")
-            
-            # Display all messages
-            st.subheader("📋 Processing Log:")
-            for _, message, _ in results:
-                st.text(message)
+                st.warning(f"Sent {successful}/{len(uploaded_files)} files")
 
 # Instructions
-with st.expander("📖 How to use this app"):
+with st.expander("How to use"):
     st.markdown("""
-    **Setup Instructions:**
-    
-    1. **Get Resend API Key**:
-       - Sign up at [Resend.com](https://resend.com)
-       - Go to API Keys section
-       - Create a new API key
-       - Copy the key
-    
-    2. **Configure Secrets**:
-       - Create `.streamlit/secrets.toml` in your app directory
-       - Add the following:
+    1. Get Resend API key from [resend.com](https://resend.com)
+    2. Create `.streamlit/secrets.toml` with:
