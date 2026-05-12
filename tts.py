@@ -18,7 +18,7 @@ DEFAULT_VOICE = "en-IN-NeerjaNeural"
 
 # Resend API configuration (from secrets)
 RESEND_API_KEY = st.secrets.get("RESEND_API_KEY", "")
-FROM_EMAIL = st.secrets.get("FROM_EMAIL", "onboarding@resend.dev")  # Resend's default sending domain
+FROM_EMAIL = st.secrets.get("FROM_EMAIL", "onboarding@resend.dev")
 TO_EMAIL = st.text_input("Recipient Email Address", placeholder="recipient@example.com", help="Where to send the MP3 files")
 
 # Async function to convert text to speech
@@ -174,14 +174,9 @@ if st.button("🚀 Convert and Send", type="primary"):
                     subject = f"Your MP3 Conversion: {original_name}"
                     body = f"""Dear User,
 
-Your text file '{original_name}' has been successfully converted to speech using Edge TTS (Microsoft Neural Voice: en-IN-NeerjaNeural).
+Your text file '{original_name}' has been successfully converted to speech using Edge TTS.
 
 Please find attached the MP3 file.
-
-File details:
-- Original file: {original_name}
-- Voice: Indian English (Female)
-- Format: MP3
 
 Best regards,
 TTS Converter"""
@@ -216,7 +211,7 @@ TTS Converter"""
 # Instructions
 with st.expander("📖 How to use this app"):
     st.markdown("""
-    ### Setup Instructions:
+    **Setup Instructions:**
     
     1. **Get Resend API Key**:
        - Sign up at [Resend.com](https://resend.com)
@@ -227,6 +222,3 @@ with st.expander("📖 How to use this app"):
     2. **Configure Secrets**:
        - Create `.streamlit/secrets.toml` in your app directory
        - Add the following:
-         ```toml
-         RESEND_API_KEY = "re_your_api_key_here"
-         FROM_EMAIL = "your_verified_domain@example.com"  # or use "onboarding@resend.dev" for testing
