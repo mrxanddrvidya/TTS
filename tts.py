@@ -19,7 +19,7 @@ st.markdown("Upload text files, convert them to speech using **EDGE TTS**, and g
 DEFAULT_VOICE = "en-IN-NeerjaNeural"
 
 # Hardcoded email configuration
-FROM_EMAIL = "onboarding@resend.dev"
+FROM_EMAIL = "PBTTS <onboarding@resend.dev>"
 TO_EMAIL = "mrxanddrvidya2023@gmail.com"
 
 # Create persistent directory for MP3 files
